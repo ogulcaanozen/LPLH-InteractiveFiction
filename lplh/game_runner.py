@@ -67,7 +67,16 @@ class GameRunner:
         print(f"  LPLH Framework - Playing: {game_name}")
         print(f"  Epochs: {self.num_epochs}, Steps/epoch: {self.max_steps}")
         print(f"  LLM: {config.LLM_PROVIDER}/{config.LLM_MODEL}")
+        print(f"  LLM: {config.LLM_PROVIDER}/{config.LLM_MODEL}")
         print(f"{'='*70}\n")
+        sys.stdout.flush()
+
+        # Integrity Check
+        if os.path.getsize(self.game_path) == 0:
+            logger.error("Game file is empty (0 bytes)! Upload failed?")
+            print("\n❌ CRITICAL ERROR: Game file is 0 bytes. Please re-upload zork1.z5 correctly.\n")
+            return {}
+
 
         start_time = time.time()
         all_step_logs = []   # detailed logs across epochs
@@ -156,14 +165,24 @@ class GameRunner:
             action = agent.act(observation, score, False, info)
 
             # Execute action in the game
+            # Execute action in the game
             try:
+                # print(f"DEBUG: Executing step {step} with action '{action}'...", flush=True)
                 observation, reward, done, info = env.step(action)
-            except Exception as e:
-                logger.warning(f"Jericho step failed: {e}")
-                observation = "Nothing happens."
+                # print(f"DEBUG: Step returned done={done}", flush=True)
+            except KeyboardInterrupt:
+                raise
+            except BaseException as e:
+                logger.error(f"CRITICAL: Jericho step failed/crashed: {e} (Type: {type(e)})")
+                print(f"\n❌ CRITICAL GAME CRASH at Step {step}: {e}")
+                import traceback
+                traceback.print_exc()
+                done = True
+                observation = "Game crashed."
                 reward = 0
-                done = False
                 info = {}
+                break  # Stop the loop on crash
+
 
             score = info.get("score", score + reward)
             max_score = max(max_score, score)
