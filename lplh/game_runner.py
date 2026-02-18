@@ -5,6 +5,7 @@ LPLH agents on IF games via the Jericho environment.
 """
 
 import os
+import sys
 import json
 import time
 import logging
