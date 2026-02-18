@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+.wsl_venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data & results (can be large)
+data/chroma_db/
+data/results_*.json
+data/logs/
+
+# Game ROMs (not redistributable)
+games/*.z5
+games/*.z3
+games/*.z6
+games/*.z8
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Debug / temp files
+jericho_debug.log
+jericho_test_output.txt
+test_jericho.py
+test_ollama.sh
+setup_games.py
