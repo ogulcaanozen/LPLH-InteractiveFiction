@@ -16,6 +16,14 @@ from .llm_client import LLMClient
 logger = logging.getLogger(__name__)
 
 
+def _trunc(text: str, length: int = 200) -> str:
+    """Truncate text for display."""
+    if not text:
+        return ""
+    t = text.replace("\n", " ").strip()
+    return t[:length] + "..." if len(t) > length else t
+
+
 class GameRunner:
     """Runs LPLH agent on an IF game for multiple epochs."""
 
@@ -55,57 +63,70 @@ class GameRunner:
 
         logger.info(f"Starting LPLH on '{game_name}': "
                      f"{self.num_epochs} epochs, {self.max_steps} steps/epoch")
-        print(f"\n{'='*60}")
+        print(f"\n{'='*70}")
         print(f"  LPLH Framework - Playing: {game_name}")
         print(f"  Epochs: {self.num_epochs}, Steps/epoch: {self.max_steps}")
         print(f"  LLM: {config.LLM_PROVIDER}/{config.LLM_MODEL}")
-        print(f"{'='*60}\n")
+        print(f"{'='*70}\n")
 
         start_time = time.time()
+        all_step_logs = []   # detailed logs across epochs
+        
+        try:
+            for epoch in range(1, self.num_epochs + 1):
+                epoch_result, epoch_steps = self._run_epoch(env, agent, epoch, game_name)
+                self.epoch_results.append(epoch_result)
+                self.all_scores.append(epoch_result["final_score"])
+                all_step_logs.append({
+                    "epoch": epoch,
+                    "steps": epoch_steps,
+                })
+    
+                print(f"\n{'─'*70}")
+                print(f"  Epoch {epoch}/{self.num_epochs} Complete")
+                print(f"  Final Score: {epoch_result['final_score']}  |  "
+                      f"Max Score: {epoch_result['max_score']}  |  "
+                      f"Steps Used: {epoch_result['steps_used']}")
+                print(f"  Rooms: {epoch_result['rooms_visited']}  |  "
+                      f"Actions Learned: {epoch_result['actions_learned']}  |  "
+                      f"Experiences: {epoch_result['experiences_stored']}")
+                print(f"{'─'*70}\n")
+        except KeyboardInterrupt:
+            print("\n\n🛑 Run interrupted by user (Ctrl+C). Saving partial results...")
+            logger.warning("Run interrupted by user.")
+        finally:
+            elapsed = time.time() - start_time
+    
+            # Compute summary statistics (if any epochs finished)
+            if self.epoch_results:
+                results = self._compute_summary(game_name, elapsed)
+                # Save results (summary)
+                self._save_results(results, game_name)
+            
+            # Save detailed step log (whatever we have)
+            if all_step_logs:
+                self._save_step_log(all_step_logs, game_name)
+    
+            print(f"\n{'='*70}")
+            if self.epoch_results:
+                print(f"  LPLH Results for '{game_name}' (Partial)")
+                print(f"  Average Score (all): {results['avg_score_all']:.1f}")
+                print(f"  Max Score: {results['max_score']}")
+            else:
+                print(f"  LPLH Results: No full epochs completed.")
+            print(f"  Total Time: {elapsed:.1f}s")
+            print(f"{'='*70}\n")
+            
+            if self.epoch_results:
+                return results
+            return {}
 
-        for epoch in range(1, self.num_epochs + 1):
-            epoch_result = self._run_epoch(env, agent, epoch, game_name)
-            self.epoch_results.append(epoch_result)
-            self.all_scores.append(epoch_result["final_score"])
 
-            print(f"\n--- Epoch {epoch}/{self.num_epochs} Complete ---")
-            print(f"  Final Score: {epoch_result['final_score']}")
-            print(f"  Max Score: {epoch_result['max_score']}")
-            print(f"  Steps Used: {epoch_result['steps_used']}")
-            print(f"  Rooms Visited: {epoch_result['rooms_visited']}")
-            print(f"  Actions Learned: {epoch_result['actions_learned']}")
-            print(f"  Experiences: {epoch_result['experiences_stored']}")
-            print()
-
-        elapsed = time.time() - start_time
-
-        # Compute summary statistics
-        results = self._compute_summary(game_name, elapsed)
-
-        # Save results
-        self._save_results(results, game_name)
-
-        print(f"\n{'='*60}")
-        print(f"  LPLH Results for '{game_name}'")
-        print(f"  Average Score (all): {results['avg_score_all']:.1f}")
-        print(f"  Average Score (last 3): {results['avg_score_last3']:.1f}")
-        print(f"  Max Score: {results['max_score']}")
-        print(f"  Total Time: {elapsed:.1f}s")
-        print(f"{'='*60}\n")
-
-        return results
-
-    def _run_epoch(self, env, agent: LPLHAgent, epoch: int, game_name: str) -> dict:
+    def _run_epoch(self, env, agent: LPLHAgent, epoch: int, game_name: str) -> tuple:
         """Run a single epoch of gameplay.
         
-        Args:
-            env: Jericho FrotzEnv
-            agent: LPLH agent
-            epoch: Current epoch number
-            game_name: Name of the game
-            
         Returns:
-            Dictionary with epoch results
+            Tuple of (epoch_result_dict, step_details_list)
         """
         # Reset environment and agent (keep experiences across epochs!)
         observation, info = env.reset()
@@ -121,11 +142,14 @@ class GameRunner:
 
         max_score = 0
         score = 0
-        step_log = []
 
         if self.verbose:
-            print(f"\n=== Epoch {epoch} ===")
-            print(f"Initial: {observation[:200]}...")
+            print(f"\n{'='*70}")
+            print(f"  EPOCH {epoch}")
+            print(f"{'='*70}")
+            print(f"\n  📍 Initial Observation:")
+            print(f"  {_trunc(observation, 300)}")
+            print()
 
         for step in range(1, self.max_steps + 1):
             # Agent decides the next action
@@ -144,30 +168,20 @@ class GameRunner:
             score = info.get("score", score + reward)
             max_score = max(max_score, score)
 
-            # Log the step
-            step_log.append({
-                "step": step,
-                "action": action,
-                "observation": observation[:500],
-                "score": score,
-                "reward": reward,
-            })
-
-            if self.verbose and step <= 20:  # Only print first 20 steps in detail
-                print(f"  [{step}] > {action}")
-                obs_preview = observation[:150].replace("\n", " ")
-                print(f"      obs: {obs_preview}")
-                print(f"      score: {score} (change: {reward:+d})")
-            elif self.verbose and step == 21:
-                print(f"  ... (continuing quietly, will show summary at end)")
+            # ── Live console output ───────────────────────────
+            if self.verbose:
+                self._print_step_detail(agent, step, action, observation, score, reward)
 
             if done:
                 logger.info(f"Epoch {epoch} ended at step {step}")
+                if self.verbose:
+                    print(f"\n  🏁 GAME OVER at step {step}")
                 break
 
         stats = agent.get_stats()
+        step_details = agent.get_step_details()
 
-        return {
+        epoch_result = {
             "epoch": epoch,
             "final_score": score,
             "max_score": max_score,
@@ -177,6 +191,73 @@ class GameRunner:
             "experiences_stored": stats["experiences_stored"],
             "game": game_name,
         }
+
+        return epoch_result, step_details
+
+    def _print_step_detail(self, agent: LPLHAgent, step: int, action: str,
+                            observation: str, score: int, reward: int):
+        """Print detailed per-step info to console during the run."""
+        # Get the latest step detail from the agent
+        if not agent.step_details:
+            return
+        d = agent.step_details[-1]
+        modules = d.get("modules", {})
+
+        # ── Header ────────────────────────────────────────────
+        reward_str = f" ({'+' if reward >= 0 else ''}{reward})" if reward != 0 else ""
+        print(f"  ┌─ Step {step}  │  Score: {score}{reward_str}  │  "
+              f"Location: {modules.get('kg_map', {}).get('current_location', '?')}")
+        print(f"  │")
+
+        # ── Command & Observation ─────────────────────────────
+        print(f"  │  🎮 Command: {action}")
+        print(f"  │  📜 Observation: {_trunc(observation, 250)}")
+
+        # ── Module 1: KG-Map ──────────────────────────────────
+        kg = modules.get("kg_map", {})
+        triples = kg.get("extracted_triples", [])
+        if triples:
+            print(f"  │")
+            print(f"  │  🗺️  KG-Map ({len(kg.get('rooms_visited', []))} rooms)")
+            for s, r, o in triples[:5]:
+                print(f"  │     Triple: ({s}, {r}, {o})")
+            if len(triples) > 5:
+                print(f"  │     ... +{len(triples)-5} more")
+        inv = kg.get("inventory", [])
+        if inv:
+            print(f"  │     Inventory: {', '.join(inv)}")
+
+        # ── Module 2: Action Space ────────────────────────────
+        act_mod = modules.get("action_space", {})
+        valid = act_mod.get("prev_action_valid")
+        split = act_mod.get("action_split")
+        if valid is not None:
+            status = "✅ Valid" if valid is True else ("❌ Invalid" if valid is False else f"⚠️ {valid}")
+            split_str = f" → verb='{split['verb']}' obj={split['objects']}" if isinstance(split, dict) else ""
+            print(f"  │  ⚡ Action Space ({act_mod.get('total_actions_learned', 0)} learned): "
+                  f"prev_action {status}{split_str}")
+            if act_mod.get("all_verbs"):
+                print(f"  │     Verbs: {', '.join(act_mod['all_verbs'][:10])}"
+                      f"{'...' if len(act_mod.get('all_verbs', [])) > 10 else ''}")
+
+        # ── Module 3: Experience Library ──────────────────────
+        exp = modules.get("experience_lib", {})
+        if exp.get("score_changed"):
+            summary = exp.get("new_experience_summary", "")
+            if summary and not str(summary).startswith("ERROR"):
+                print(f"  │  💡 New Experience: {_trunc(str(summary), 150)}")
+        retrieved = exp.get("retrieved_experiences", "")
+        if retrieved and retrieved != "No relevant experiences found yet.":
+            print(f"  │  📚 Retrieved: {_trunc(str(retrieved), 150)}")
+
+        # ── LLM Response ──────────────────────────────────────
+        gen = modules.get("action_generation", {})
+        raw = gen.get("llm_raw_response", "")
+        if raw and not str(raw).startswith("ERROR"):
+            print(f"  │  🤖 LLM Response: {_trunc(str(raw), 200)}")
+
+        print(f"  └{'─'*69}")
+        print()
 
     def _compute_summary(self, game_name: str, elapsed: float) -> dict:
         """Compute summary statistics across all epochs."""
@@ -212,3 +293,15 @@ class GameRunner:
         
         logger.info(f"Results saved to {filepath}")
         print(f"Results saved to: {filepath}")
+
+    def _save_step_log(self, all_step_logs: list, game_name: str):
+        """Save detailed per-step log to a JSON file for post-run analysis."""
+        os.makedirs(config.LOGS_DIR, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"steplog_{game_name}_{timestamp}.json"
+        filepath = os.path.join(config.LOGS_DIR, filename)
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(all_step_logs, f, indent=2, default=str)
+
+        print(f"Detailed step log saved to: {filepath}")
