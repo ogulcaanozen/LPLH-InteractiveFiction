@@ -80,7 +80,6 @@ class GameRunner:
         print(f"  LPLH Framework - Playing: {game_name}")
         print(f"  Epochs: {self.num_epochs}, Steps/epoch: {self.max_steps}")
         print(f"  LLM: {config.LLM_PROVIDER}/{config.LLM_MODEL}")
-        print(f"  LLM: {config.LLM_PROVIDER}/{config.LLM_MODEL}")
         print(f"{'='*70}\n")
         sys.stdout.flush()
 
@@ -390,8 +389,15 @@ class GameRunner:
         if exp.get("score_changed") and exp.get("new_experience_summary"):
             summary = str(exp["new_experience_summary"])
             if not summary.startswith("ERROR"):
-                lines.append("\n[NEW EXPERIENCE STORED]")
+                lines.append("\n[NEW EXPERIENCE STORED (score change)]")
                 lines.append(summary)
+        neutral_triggers_fired = exp.get("neutral_triggers_fired", [])
+        neutral_summaries = exp.get("neutral_summaries", [])
+        if neutral_triggers_fired:
+            lines.append(f"\nNeutral triggers fired: {', '.join(neutral_triggers_fired)}")
+        for trigger_type, summary in neutral_summaries:
+            lines.append(f"\n[NEUTRAL EXPERIENCE: {trigger_type.upper()}]")
+            lines.append(str(summary))
         lines.append("\n[RETRIEVED EXPERIENCES]")
         lines.append(str(exp.get("retrieved_experiences", "None")))
 
