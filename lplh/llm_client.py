@@ -55,12 +55,23 @@ class LLMClient:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": user_prompt})
 
-        response = self._ollama.chat(
-            model=self.model,
-            messages=messages,
-            options={"temperature": temperature},
-            think=think,
-        )
+        try:
+            response = self._ollama.chat(
+                model=self.model,
+                messages=messages,
+                options={"temperature": temperature},
+                think=think,
+            )
+        except Exception as e:
+            if think and "does not support thinking" in str(e):
+                # Non-thinking model (e.g. qwen2.5) — retry without think flag
+                response = self._ollama.chat(
+                    model=self.model,
+                    messages=messages,
+                    options={"temperature": temperature},
+                )
+            else:
+                raise
         return response["message"]["content"]
 
     def _chat_openai(self, system_prompt: str, user_prompt: str, temperature: float) -> str:
