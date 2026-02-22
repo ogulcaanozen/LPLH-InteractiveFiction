@@ -321,7 +321,12 @@ class GameRunner:
         if exp.get("score_changed"):
             summary = exp.get("new_experience_summary", "")
             if summary and not str(summary).startswith("ERROR"):
-                print(f"  │  💡 New Experience: {_trunc(str(summary), 150)}", flush=True)
+                print(f"  │  💡 New Experience (score): {_trunc(str(summary), 150)}", flush=True)
+        # Neutral-state experiences
+        for trigger_type, summary in exp.get("neutral_summaries", []):
+            label = {"navigation": "🧭", "narrative": "📖",
+                     "environmental": "🔧", "error_correction": "✔️"}.get(trigger_type, "💡")
+            print(f"  │  {label} New Experience ({trigger_type}): {_trunc(str(summary), 150)}", flush=True)
         retrieved = exp.get("retrieved_experiences", "")
         if retrieved and retrieved != "No relevant experiences found yet.":
             print(f"  │  📚 Retrieved: {_trunc(str(retrieved), 150)}", flush=True)

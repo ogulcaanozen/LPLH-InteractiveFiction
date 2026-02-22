@@ -208,6 +208,121 @@ Your internal reasoning steps Here.
 
 
 # ─────────────────────────────────────────────────────────────
+# LPLH2 Enhancement: Neutral State Experience Prompts
+# Four separate prompts, one per neutral trigger type.
+# These fire when reward_change == 0 but a meaningful event occurred.
+# ─────────────────────────────────────────────────────────────
+
+# Trigger 1: Agent enters a previously unvisited location
+NAVIGATION_EXPERIENCE_PROMPT = """<START OF INSTRUCTIONS>
+You are summarizing a navigation event in a text-based game. The player has just entered a location they have never visited before. Capture the essential spatial and object information so it can be used as a reference in future playthroughs.
+
+**Summary Structure:**
+1. "location": The name of the newly discovered room.
+2. "arrived_from": Where the player came from and what action/direction was used to get here.
+3. "objects_present": A concise list of objects or features noticed in this room.
+4. "exits_known": Any exits or directions mentioned in the observation.
+5. "important_experience": Anything notable — locked doors, dangerous areas, useful items, hints — that could matter later.
+
+**Remember:**
+- Only record what is directly stated in the observation.
+- Do not invent or speculate about content not mentioned.
+- Keep it concise and factual.
+
+**Output Format:**
+- Mark location names with <loc> loc name <loc>, actions with <step> action <step>, objects with <obj> object <obj>.
+- End with retrieval tags (max 4) between <tag> * </tag>. Include the room name as <room> * </room>.
+- Think first, then give the final summary between '|start|' and '|end|'.
+<END OF INSTRUCTIONS>
+
+Current Location (newly entered): {location}
+Previous Location: {prev_location}
+Action Taken: {action}
+Observation: {observation}"""
+
+
+# Trigger 2: Agent examines an object, reads a note, or talks to someone
+NARRATIVE_EXPERIENCE_PROMPT = """<START OF INSTRUCTIONS>
+You are summarizing an information-retrieval event in a text-based game. The player just examined, read, or inspected something that revealed meaningful content. Capture the key information for future reference.
+
+**Summary Structure:**
+1. "location": Where this happened.
+2. "source": What was examined, read, or interacted with.
+3. "content": The key information that was revealed (be concise — only what was actually shown).
+4. "implication": What this information suggests about puzzles, progression, or dangers ahead.
+5. "important_experience": Any specific clues, warnings, or instructions that could be directly useful in a future playthrough.
+
+**Remember:**
+- Only record content explicitly stated in the observation.
+- "nothing special" or empty responses are not worth summarising — do not call this for those.
+- Focus on actionable information.
+
+**Output Format:**
+- Mark location names with <loc> loc name <loc>, actions with <step> action <step>, objects with <obj> object <obj>.
+- End with retrieval tags (max 4) between <tag> * </tag>. Include the room name as <room> * </room>.
+- Think first, then give the final summary between '|start|' and '|end|'.
+<END OF INSTRUCTIONS>
+
+Current Location: {location}
+Action Taken: {action}
+Observation: {observation}"""
+
+
+# Trigger 3: An action changes the environment (opens a path, toggles a switch, etc.)
+ENVIRONMENTAL_CHANGE_PROMPT = """<START OF INSTRUCTIONS>
+You are summarizing an environmental change event in a text-based game. The player just performed an action that altered the game world — such as opening a door, moving an object, or activating a mechanism — without directly earning points. Capture what changed and why it matters.
+
+**Summary Structure:**
+1. "location": Where this happened.
+2. "trigger_action": The exact action that caused the change.
+3. "change_description": What specifically changed in the environment.
+4. "new_possibility": What new options, paths, or interactions this change enables.
+5. "important_experience": The key lesson — what to remember about this action and in what context it is useful for future playthroughs.
+
+**Remember:**
+- Focus on what is now possible that was not possible before.
+- Be specific about the action that caused the change.
+- Do not speculate beyond what the observation confirms.
+
+**Output Format:**
+- Mark location names with <loc> loc name <loc>, actions with <step> action <step>, objects with <obj> object <obj>.
+- End with retrieval tags (max 4) between <tag> * </tag>. Include the room name as <room> * </room>.
+- Think first, then give the final summary between '|start|' and '|end|'.
+<END OF INSTRUCTIONS>
+
+Current Location: {location}
+Action Taken: {action}
+Observation: {observation}"""
+
+
+# Trigger 4: Agent finds a valid command after 2+ consecutive failures
+ERROR_CORRECTION_PROMPT = """<START OF INSTRUCTIONS>
+You are summarising a command-discovery event in a text-based game. After several failed attempts, the player found a command that the game understood and accepted. Capture the correct syntax pattern so it can be reused in similar future situations.
+
+**Summary Structure:**
+1. "location": Where this happened.
+2. "correct_command": The exact command that succeeded.
+3. "failed_attempts": The commands that were tried and rejected before success.
+4. "pattern_learned": The general rule or syntax this reveals (e.g., "use 'go through X' not 'enter X'", "use 'climb tree' not 'go up tree'").
+5. "important_experience": When and how to apply this command pattern in similar future situations.
+
+**Remember:**
+- The goal is to extract a reusable command pattern, not just record the single event.
+- Be specific about what was wrong with the failed attempts vs. what made the correct one work.
+
+**Output Format:**
+- Mark location names with <loc> loc name <loc>, actions with <step> action <step>, objects with <obj> object <obj>.
+- End with retrieval tags (max 4) between <tag> * </tag>. Include the room name as <room> * </room>.
+- Think first, then give the final summary between '|start|' and '|end|'.
+<END OF INSTRUCTIONS>
+
+Current Location: {location}
+Successful Command: {action}
+Observation: {observation}
+Recent Failed Commands: {failed_attempts}"""
+
+
+# ─────────────────────────────────────────────────────────────
 # Table 7: Baseline Action Generation (for comparison)
 # ─────────────────────────────────────────────────────────────
 BASELINE_ACTION_GENERATION_PROMPT = """You are playing the classic text-based interactive fiction game. Your goal is to explore, solve puzzles, collect treasures, and reach the winning end state. Throughout the game, you will:

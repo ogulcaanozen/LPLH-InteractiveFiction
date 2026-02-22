@@ -1,12 +1,13 @@
-"""LPLH Agent - Zero-shot Decision-making.
+"""LPLH2 Agent - Enhanced Zero-shot Decision-making.
 
-The main agent that ties all three modules together:
-1. Dynamic KG-Map (spatial reasoning)
-2. Action Space Learning (verb-object discovery)
-3. Experience Library (reflective learning via RAG)
+Extends the original LPLH agent with neutral-state experience storage.
 
-At each step, it integrates all module outputs with the current
-observation to generate the next game command via zero-shot prompting.
+Original LPLH stores experience only on score changes (reward_change != 0).
+LPLH2 also stores experience for four neutral-state triggers:
+  1. Navigation       — agent enters a previously unvisited location
+  2. Narrative        — agent examines/reads/talks and gets meaningful content
+  3. Environmental    — an action changes the game world without giving points
+  4. Error correction — agent finds a valid command after 2+ consecutive failures
 """
 
 import re
@@ -22,15 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class LPLHAgent:
-    """LPLH Agent for playing Interactive Fiction games.
-
-    Implements the full LPLH pipeline from the paper (Section 3.5):
-    1. Update KG-map with extracted relations
-    2. Validate & store action in action space
-    3. Summarize experience on score change
-    4. Retrieve relevant experiences
-    5. Generate next command via zero-shot LLM
-    """
+    """LPLH2 Agent for playing Interactive Fiction games."""
 
     def __init__(self, llm_client: LLMClient = None):
         self.llm = llm_client or LLMClient()
@@ -45,16 +38,15 @@ class LPLHAgent:
         self.total_score = 0
         self.step_count = 0
 
+        # Neutral-state tracking
+        self.consecutive_failures = 0        # increments on invalid, resets on valid
+        self.recent_failed_actions = []      # sliding window of recent invalid commands
+
         # Per-step detail log for tracking
         self.step_details = []
 
     def reset(self, keep_experiences: bool = True):
-        """Reset the agent for a new epoch.
-        
-        Args:
-            keep_experiences: If True, keep experiences across epochs 
-                            (key for learning behavior). If False, full reset.
-        """
+        """Reset the agent for a new epoch."""
         self.kg_map.reset()
         self.action_space.reset()
         if not keep_experiences:
@@ -64,30 +56,17 @@ class LPLHAgent:
         self.prev_score = 0
         self.total_score = 0
         self.step_count = 0
+        self.consecutive_failures = 0
+        self.recent_failed_actions = []
         self.step_details = []
         logger.info(f"Agent reset (keep_experiences={keep_experiences})")
 
     def act(self, observation: str, score: int, done: bool, info: dict) -> str:
-        """Decide the next action given the current game state.
-        
-        This is the main method called at each game step.
-        
-        Args:
-            observation: Current text observation from the game
-            score: Current game score
-            done: Whether the game has ended
-            info: Additional info from Jericho
-            
-        Returns:
-            The next command string to send to the game
-        """
+        """Decide the next action given the current game state."""
         self.step_count += 1
         reward_change = score - self.prev_score
 
         # ── History update ────────────────────────────────────
-        # observation is the game's response to prev_action, so
-        # (prev_action, observation) is a correct completed pair.
-        # Must happen before _format_history() is called below.
         if self.prev_action is not None:
             self.history.append((self.prev_action, observation))
             if len(self.history) > config.HISTORY_LENGTH:
@@ -102,6 +81,10 @@ class LPLHAgent:
             "prev_action": self.prev_action,
             "modules": {},
         }
+
+        # ── Snapshot state BEFORE Step 1 (for navigation detection) ──
+        visited_rooms_before = set(self.kg_map.visited_rooms)
+        prev_location = self.kg_map.current_location
 
         # ── Step 1: Update KG-map with relation extraction ────
         extracted_triples = []
@@ -130,13 +113,10 @@ class LPLHAgent:
                 is_valid = self.llm.validate_action(self.prev_action, observation)
                 action_valid = is_valid
                 if not is_valid:
-                    # If a movement direction was invalid, remove it from may_direction
                     prev_lower = self.prev_action.lower().strip()
                     if prev_lower in self.kg_map._direction_set():
                         self.kg_map.mark_direction_tried(prev_lower)
                 else:
-                    # If a movement direction was valid, also remove from may_direction
-                    # (the relation extractor may not always extract the direction triple)
                     prev_lower = self.prev_action.lower().strip()
                     if prev_lower in self.kg_map._direction_set():
                         self.kg_map.mark_direction_tried(prev_lower)
@@ -146,11 +126,6 @@ class LPLHAgent:
                     self.action_space.store_action(split["verb"], split["objects"])
                     logger.debug(f"Valid action stored: {split}")
 
-                    # Update inventory only for confirmed-valid take/drop actions.
-                    # This must happen here (after validation) so that failed
-                    # attempts like "take sword" → "The sword is too heavy" do
-                    # NOT pollute the inventory. (kg_map.update no longer touches
-                    # inventory so it cannot hallucinate items.)
                     prev_lower = self.prev_action.lower().strip()
                     if prev_lower.startswith("take ") or prev_lower.startswith("get "):
                         item = self.prev_action[5:].strip() if prev_lower.startswith("take ") else self.prev_action[4:].strip()
@@ -158,10 +133,6 @@ class LPLHAgent:
                     elif prev_lower.startswith("drop "):
                         self.kg_map.drop_item(self.prev_action[5:].strip())
                     elif prev_lower.startswith(("eat ", "drink ", "give ")):
-                        # These verbs always consume the item — remove from
-                        # inventory without putting it back in the room.
-                        # "throw" and "use" are intentionally excluded: outcome
-                        # is conditional and can't be determined from verb alone.
                         item = self.prev_action.split(" ", 1)[1].strip() if " " in self.prev_action else ""
                         if item:
                             self.kg_map.consume_item(item)
@@ -177,7 +148,7 @@ class LPLHAgent:
             "all_verbs": list(self.action_space.verbs.keys()),
         }
 
-        # ── Step 3: Summarize experience on score change ──────
+        # ── Step 3a: Summarize experience on score change (original) ──
         experience_summary = None
         if reward_change != 0 and self.prev_action:
             try:
@@ -191,6 +162,7 @@ class LPLHAgent:
                 self.experience_lib.store_experience(
                     experience_text=exp_summary,
                     metadata={
+                        "trigger": "score_change",
                         "score_change": reward_change,
                         "current_score": score,
                         "step": self.step_count,
@@ -202,6 +174,55 @@ class LPLHAgent:
                 logger.warning(f"Experience summarization failed: {e}")
                 experience_summary = f"ERROR: {e}"
 
+        # ── Step 3b: Neutral-state experience storage (LPLH2 enhancement) ──
+        neutral_triggers = []
+        neutral_summaries = []
+
+        if self.prev_action and reward_change == 0 and not done:
+            neutral_triggers = self._detect_neutral_triggers(
+                observation=observation,
+                action_valid=action_valid,
+                visited_rooms_before=visited_rooms_before,
+                prev_location=prev_location,
+            )
+
+            for trigger_type, trigger_meta in neutral_triggers:
+                try:
+                    summary = self.llm.summarize_neutral_experience(
+                        trigger=trigger_type,
+                        action=self.prev_action,
+                        observation=observation,
+                        location=self.kg_map.current_location or "unknown",
+                        prev_location=trigger_meta.get("prev_location"),
+                        failed_attempts=trigger_meta.get("failed_attempts"),
+                    )
+                    if summary:
+                        self.experience_lib.store_experience(
+                            experience_text=summary,
+                            metadata={
+                                "trigger": trigger_type,
+                                "score_change": 0,
+                                "current_score": score,
+                                "step": self.step_count,
+                                "location": self.kg_map.current_location or "unknown",
+                            },
+                        )
+                        neutral_summaries.append((trigger_type, summary))
+                        logger.info(f"Neutral experience stored: {trigger_type}")
+                except Exception as e:
+                    logger.warning(f"Neutral experience failed ({trigger_type}): {e}")
+
+        # Update consecutive-failure counter AFTER trigger detection
+        # (so error_correction check above can still read the current count)
+        if action_valid is True:
+            self.consecutive_failures = 0
+            self.recent_failed_actions = []
+        elif action_valid is False:
+            self.consecutive_failures += 1
+            self.recent_failed_actions.append(self.prev_action)
+            if len(self.recent_failed_actions) > 5:
+                self.recent_failed_actions = self.recent_failed_actions[-5:]
+
         # ── Step 4: Retrieve relevant experiences ─────────────
         query = f"Location: {self.kg_map.current_location}. Observation: {observation[:200]}"
         experiences = self.experience_lib.retrieve_relevant(query)
@@ -209,6 +230,8 @@ class LPLHAgent:
         detail["modules"]["experience_lib"] = {
             "score_changed": reward_change != 0,
             "new_experience_summary": experience_summary,
+            "neutral_triggers_fired": [t for t, _ in neutral_triggers],
+            "neutral_summaries": neutral_summaries,
             "retrieved_experiences": experiences,
             "total_experiences": self.experience_lib.num_experiences(),
         }
@@ -216,7 +239,7 @@ class LPLHAgent:
         # ── Step 5: Generate next command ─────────────────────
         room_info = self.kg_map.get_current_room_info()
         current_objects = room_info.get("objects", [])
-        
+
         prompt = LPLH_ACTION_GENERATION_PROMPT.format(
             kg_map=self.kg_map.to_prompt_string(),
             action_pairs=self.action_space.to_prompt_string(current_objects),
@@ -237,12 +260,10 @@ class LPLHAgent:
         except Exception as e:
             err_str = str(e).lower()
             if any(x in err_str for x in ["connect", "refused", "unreachable", "failed to connect"]):
-                # Ollama server is down — re-raise so the run stops immediately
-                # instead of spamming "look" for the rest of the epoch.
                 raise RuntimeError(f"Ollama server unreachable: {e}") from e
             logger.error(f"Action generation failed: {e}")
             raw_llm_response = f"ERROR: {e}"
-            command = "look"  # Safe fallback for non-connection errors
+            command = "look"
 
         detail["modules"]["action_generation"] = {
             "prompt_kg_map": self.kg_map.to_prompt_string(),
@@ -262,24 +283,119 @@ class LPLHAgent:
         self.step_details.append(detail)
 
         logger.info(f"Step {self.step_count}: score={score} ({reward_change:+d}) "
-                     f"cmd='{command}' loc='{self.kg_map.current_location}'")
+                    f"cmd='{command}' loc='{self.kg_map.current_location}'")
 
         return command
 
-    def _parse_command(self, response: str) -> str:
-        """Extract the game command from the LLM response.
+    # ── Neutral-state detection ───────────────────────────────
 
-        Looks for |start| <com>[command]</com> ... |end| pattern.
-        Falls back to |start| [command] |end| pattern.
+    def _detect_neutral_triggers(self, observation: str, action_valid,
+                                  visited_rooms_before: set,
+                                  prev_location: str) -> list:
+        """Detect which neutral-state triggers fired this step.
+
+        Returns a list of (trigger_type, metadata_dict) tuples.
+        At most one trigger per type fires per step.
         """
-        # Try <com>...</com> pattern first (LPLH format)
+        triggers = []
+
+        # 1. Navigation: entered a room not visited before this step
+        new_location = self.kg_map.current_location
+        if (new_location
+                and new_location not in visited_rooms_before
+                and new_location != prev_location):
+            triggers.append(("navigation", {"prev_location": prev_location}))
+
+        # Only check the remaining triggers if the action was confirmed valid
+        if action_valid is not True:
+            return triggers
+
+        # 2. Narrative: examine / read / talk with informative result
+        if self._is_narrative_action(self.prev_action) and self._is_informative(observation):
+            triggers.append(("narrative", {}))
+
+        # 3. Environmental change: non-movement action that altered the world
+        #    (skip if we already fired navigation — entering a new room via an
+        #     unusual verb like "go through window" is handled by navigation)
+        nav_fired = any(t == "navigation" for t, _ in triggers)
+        if (not nav_fired
+                and not self._is_movement_action(self.prev_action)
+                and self._is_environmental_change(observation)):
+            triggers.append(("environmental", {}))
+
+        # 4. Error correction: valid action after 2+ consecutive failures
+        if self.consecutive_failures >= 2:
+            triggers.append(("error_correction", {
+                "failed_attempts": list(self.recent_failed_actions),
+            }))
+
+        return triggers
+
+    # ── Detection helpers ─────────────────────────────────────
+
+    def _is_narrative_action(self, action: str) -> bool:
+        """True if the action is an examine / read / talk type."""
+        a = action.lower().strip()
+        return a.startswith((
+            "examine ", "read ", "look at ", "inspect ", "describe ",
+            "ask ", "talk to ", "x ",
+        ))
+
+    def _is_informative(self, observation: str) -> bool:
+        """True if the observation contains meaningful content (not a noise response)."""
+        obs = observation.lower()
+        noise = [
+            "nothing special", "nothing unusual", "i don't understand",
+            "i don't know the word", "you can't see any", "there is nothing",
+            "how does one", "you must tell me", "that's not a verb",
+            "you can't", "i don't see any", "what do you want to",
+        ]
+        if any(p in obs for p in noise):
+            return False
+        return len(observation.strip()) > 50
+
+    def _is_movement_action(self, action: str) -> bool:
+        """True if the action is a movement/navigation command."""
+        directions = {
+            "north", "south", "east", "west",
+            "northeast", "northwest", "southeast", "southwest",
+            "up", "down", "n", "s", "e", "w",
+            "ne", "nw", "se", "sw", "in", "out",
+        }
+        a = action.lower().strip()
+        if a in directions:
+            return True
+        return a.startswith((
+            "go ", "move ", "walk ", "run ",
+            "climb up", "climb down", "go through",
+            "go up", "go down", "enter ", "exit ",
+        ))
+
+    def _is_environmental_change(self, observation: str) -> bool:
+        """True if the observation indicates the game world was altered."""
+        obs = observation.lower()
+        change_phrases = [
+            "now open", "now closed", "opens", "opened", "closes", "closed",
+            "you open", "you close", "you move", "you push", "you pull",
+            "you unlock", "you lock", "click", "you hear a click",
+            "a light", "light comes on", "light goes out",
+            "reveals", "revealed", "appears", "disappears",
+            "the door", "the gate", "the window",
+            "passage", "path is now", "way is now",
+            "great effort", "with effort",
+        ]
+        return any(p in obs for p in change_phrases)
+
+    # ── Shared helpers ────────────────────────────────────────
+
+    def _parse_command(self, response: str) -> str:
+        """Extract the game command from the LLM response."""
         com_match = re.search(r"<com>\s*(.+?)\s*</com>", response)
         if com_match:
             cmd = self._clean_command(com_match.group(1))
             if self._is_plausible_command(cmd):
                 return cmd
 
-        # Try |start| ... |end| pattern (baseline format)
         start_match = re.search(r"\|start\|\s*(.+?)\s*\|end\|", response, re.DOTALL)
         if start_match:
             text = start_match.group(1).strip()
@@ -288,18 +404,18 @@ class LPLHAgent:
             if self._is_plausible_command(cmd):
                 return cmd
 
-        return "look"  # fallback — safe and avoids sending garbage to the game
+        return "look"
 
     def _clean_command(self, cmd: str) -> str:
         """Strip markdown formatting that the LLM sometimes wraps commands in."""
         cmd = cmd.strip()
-        cmd = re.sub(r'^`+|`+$', '', cmd).strip()   # remove surrounding backticks
-        cmd = re.sub(r'^\*+|\*+$', '', cmd).strip()  # remove surrounding asterisks
-        cmd = re.sub(r'^\[+|\]+$', '', cmd).strip()  # remove surrounding square brackets
+        cmd = re.sub(r'^`+|`+$', '', cmd).strip()
+        cmd = re.sub(r'^\*+|\*+$', '', cmd).strip()
+        cmd = re.sub(r'^\[+|\]+$', '', cmd).strip()
         return cmd
 
     def _is_plausible_command(self, cmd: str) -> bool:
-        """Return False if cmd looks like an assistant-mode response rather than a game command."""
+        """Return False if cmd looks like an assistant response rather than a game command."""
         if not cmd:
             return False
         if len(cmd) > 50:
@@ -316,7 +432,6 @@ class LPLHAgent:
         for i, (action, obs) in enumerate(self.history):
             output.append(f"Turn {i+1}:")
             output.append(f"  Action: {action}")
-            # Truncate long observations
             obs_short = obs[:300] + "..." if len(obs) > 300 else obs
             output.append(f"  Observation: {obs_short}")
         return "\n".join(output)

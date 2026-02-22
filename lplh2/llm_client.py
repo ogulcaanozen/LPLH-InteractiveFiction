@@ -171,7 +171,69 @@ class LLMClient:
         else:
             return {"verb": parts[0] + " &", "objects": [" ".join(parts[1:])]}
 
-    def summarize_experience(self, history: str, reward_change: int, 
+    def summarize_neutral_experience(self, trigger: str, action: str,
+                                      observation: str, location: str,
+                                      prev_location: str = None,
+                                      failed_attempts: list = None) -> str:
+        """Generate an experience summary for a neutral-state trigger.
+
+        Args:
+            trigger: One of 'navigation', 'narrative', 'environmental', 'error_correction'
+            action: The action that caused the trigger
+            observation: The game's response to that action
+            location: Current location name
+            prev_location: Previous location (navigation trigger only)
+            failed_attempts: List of recent failed commands (error_correction trigger only)
+
+        Returns:
+            Extracted |start|...|end| summary text, or raw response if tags absent.
+        """
+        from .prompts import (
+            NAVIGATION_EXPERIENCE_PROMPT,
+            NARRATIVE_EXPERIENCE_PROMPT,
+            ENVIRONMENTAL_CHANGE_PROMPT,
+            ERROR_CORRECTION_PROMPT,
+        )
+
+        if trigger == "navigation":
+            prompt = NAVIGATION_EXPERIENCE_PROMPT.format(
+                location=location,
+                prev_location=prev_location or "unknown",
+                action=action,
+                observation=observation,
+            )
+        elif trigger == "narrative":
+            prompt = NARRATIVE_EXPERIENCE_PROMPT.format(
+                location=location,
+                action=action,
+                observation=observation,
+            )
+        elif trigger == "environmental":
+            prompt = ENVIRONMENTAL_CHANGE_PROMPT.format(
+                location=location,
+                action=action,
+                observation=observation,
+            )
+        elif trigger == "error_correction":
+            failed_str = ", ".join(failed_attempts) if failed_attempts else "none recorded"
+            prompt = ERROR_CORRECTION_PROMPT.format(
+                location=location,
+                action=action,
+                observation=observation,
+                failed_attempts=failed_str,
+            )
+        else:
+            logger.warning(f"Unknown neutral trigger type: {trigger}")
+            return ""
+
+        response = self.chat("", prompt, temperature=self.temperature)
+
+        match = re.search(r"\|start\|\s*(.*?)\s*\|end\|", response, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        return response.strip()
+
+    def summarize_experience(self, history: str, reward_change: int,
                               current_score: int) -> str:
         """Generate a structured experience summary (Table 8 prompt).
         
