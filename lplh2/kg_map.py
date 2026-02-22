@@ -163,10 +163,37 @@ class KGMap:
         }
 
     def mark_direction_tried(self, direction: str):
-        """Remove a tried-but-invalid direction from may_direction."""
+        """Remove a tried direction from may_direction of the CURRENT location."""
         direction_lower = direction.strip().lower()
         if self.current_location and self.current_location in self.nodes:
             may = self.nodes[self.current_location]["may_direction"]
+            if direction_lower in may:
+                may.remove(direction_lower)
+
+    def mark_direction_tried_at(self, direction: str, location: str):
+        """Remove a tried direction from may_direction of a SPECIFIC location.
+
+        Used when current_location has already changed (e.g. after a valid move)
+        and we need to update the SOURCE room, not the destination.
+        """
+        direction_lower = direction.strip().lower()
+        if location and location in self.nodes:
+            may = self.nodes[location]["may_direction"]
+            if direction_lower in may:
+                may.remove(direction_lower)
+
+    def confirm_direction(self, from_location: str, direction: str, to_location: str):
+        """Record a confirmed valid exit in the source room.
+
+        Called as a backup when the relation extractor fails to produce the
+        direction triple for a successful movement command.
+        """
+        direction_lower = direction.strip().lower()
+        if from_location and from_location in self.nodes:
+            node = self.nodes[from_location]
+            if direction_lower not in node["direction"]:
+                node["direction"][direction_lower] = to_location
+            may = node["may_direction"]
             if direction_lower in may:
                 may.remove(direction_lower)
 

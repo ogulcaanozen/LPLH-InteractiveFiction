@@ -112,14 +112,26 @@ class LPLHAgent:
             try:
                 is_valid = self.llm.validate_action(self.prev_action, observation)
                 action_valid = is_valid
+                bare_dir = self._extract_bare_direction(self.prev_action)
                 if not is_valid:
-                    prev_lower = self.prev_action.lower().strip()
-                    if prev_lower in self.kg_map._direction_set():
-                        self.kg_map.mark_direction_tried(prev_lower)
+                    # Invalid movement: current_location is still the SOURCE room
+                    # (the move failed so no location change in Step 1).
+                    # Remove the direction from SOURCE room's may_direction so the
+                    # agent never retries it from here.
+                    if bare_dir:
+                        self.kg_map.mark_direction_tried(bare_dir)
                 else:
-                    prev_lower = self.prev_action.lower().strip()
-                    if prev_lower in self.kg_map._direction_set():
-                        self.kg_map.mark_direction_tried(prev_lower)
+                    # Valid movement: current_location has already changed to the
+                    # DESTINATION room after Step 1 — we must update the SOURCE room
+                    # (prev_location) explicitly.
+                    # Also records the confirmed direction if the relation extractor
+                    # missed the direction triple (inconsistent LLM output).
+                    if bare_dir and prev_location:
+                        self.kg_map.confirm_direction(
+                            from_location=prev_location,
+                            direction=bare_dir,
+                            to_location=self.kg_map.current_location or "unknown",
+                        )
                 if is_valid:
                     split = self.llm.split_action(self.prev_action)
                     action_split = split
@@ -387,6 +399,28 @@ class LPLHAgent:
         return any(p in obs for p in change_phrases)
 
     # ── Shared helpers ────────────────────────────────────────
+
+    def _extract_bare_direction(self, action: str) -> str:
+        """Extract the bare direction word from a movement command.
+
+        Handles both 'north' and 'go north' forms.
+        Returns None if the action is not a direction command.
+
+        Examples:
+            'north'      → 'north'
+            'go north'   → 'north'
+            'go northeast' → 'northeast'
+            'open door'  → None
+        """
+        direction_set = self.kg_map._direction_set()
+        a = action.lower().strip()
+        if a in direction_set:
+            return a
+        if a.startswith("go "):
+            candidate = a[3:].strip()
+            if candidate in direction_set:
+                return candidate
+        return None
 
     def _parse_command(self, response: str) -> str:
         """Extract the game command from the LLM response."""
