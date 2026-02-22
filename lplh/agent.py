@@ -235,9 +235,14 @@ class LPLHAgent:
             )
             command = self._parse_command(raw_llm_response)
         except Exception as e:
+            err_str = str(e).lower()
+            if any(x in err_str for x in ["connect", "refused", "unreachable", "failed to connect"]):
+                # Ollama server is down — re-raise so the run stops immediately
+                # instead of spamming "look" for the rest of the epoch.
+                raise RuntimeError(f"Ollama server unreachable: {e}") from e
             logger.error(f"Action generation failed: {e}")
             raw_llm_response = f"ERROR: {e}"
-            command = "look"  # Safe fallback
+            command = "look"  # Safe fallback for non-connection errors
 
         detail["modules"]["action_generation"] = {
             "prompt_kg_map": self.kg_map.to_prompt_string(),

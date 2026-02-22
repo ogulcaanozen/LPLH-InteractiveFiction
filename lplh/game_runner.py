@@ -116,6 +116,14 @@ class GameRunner:
         except KeyboardInterrupt:
             print("\n\n🛑 Run interrupted by user (Ctrl+C). Saving partial results...")
             logger.warning("Run interrupted by user.")
+        except RuntimeError as e:
+            if "unreachable" in str(e).lower() or "connect" in str(e).lower():
+                print(f"\n\n❌ OLLAMA SERVER LOST: {e}")
+                print("The Ollama server crashed or became unreachable. Stopping run.")
+                print("Partial results (completed epochs) will be saved.")
+            else:
+                raise
+            logger.error(f"Run stopped: {e}")
         finally:
             if self._log_file:
                 self._log_file.close()
