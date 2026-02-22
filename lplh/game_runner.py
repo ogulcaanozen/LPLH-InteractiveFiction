@@ -112,7 +112,39 @@ class GameRunner:
                 print(f"  Rooms: {epoch_result['rooms_visited']}  |  "
                       f"Actions Learned: {epoch_result['actions_learned']}  |  "
                       f"Experiences: {epoch_result['experiences_stored']}")
+
+                # ── KG-Map rooms ──────────────────────────────
+                rooms = list(agent.kg_map.visited_rooms)
+                rooms_str = ", ".join(rooms) if rooms else "(none)"
+                print(f"\n  KG-Map Rooms ({len(rooms)}):")
+                print(f"    {rooms_str}")
+
+                # ── Action Space verbs ────────────────────────
+                verbs = sorted(agent.action_space.verbs.keys())
+                verbs_str = ", ".join(verbs) if verbs else "(none)"
+                print(f"\n  Learned Verbs ({len(verbs)}):")
+                print(f"    {verbs_str}")
+
                 print(f"{'─'*70}\n")
+
+                # ── Write same summary to the run log file ────
+                if self._log_file:
+                    self._log_file.write("\n" + "=" * 70 + "\n")
+                    self._log_file.write(
+                        f"EPOCH {epoch} SUMMARY\n"
+                        f"  Final Score : {epoch_result['final_score']}\n"
+                        f"  Steps Used  : {epoch_result['steps_used']}\n"
+                        f"  Experiences : {epoch_result['experiences_stored']}\n"
+                    )
+                    self._log_file.write(f"\n  KG-Map Rooms ({len(rooms)}):\n")
+                    for r in rooms:
+                        self._log_file.write(f"    - {r}\n")
+                    self._log_file.write(f"\n  Learned Verbs ({len(verbs)}):\n")
+                    for v in verbs:
+                        objs = sorted(agent.action_space.verbs[v])
+                        objs_str = ", ".join(objs) if objs else "(no objects)"
+                        self._log_file.write(f"    - {v}  [{objs_str}]\n")
+                    self._log_file.write("=" * 70 + "\n")
         except KeyboardInterrupt:
             print("\n\n🛑 Run interrupted by user (Ctrl+C). Saving partial results...")
             logger.warning("Run interrupted by user.")
