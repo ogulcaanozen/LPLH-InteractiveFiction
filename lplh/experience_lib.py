@@ -78,23 +78,23 @@ class ExperienceLib:
 
     def retrieve_relevant(self, query: str, top_k: int = None) -> str:
         """Retrieve relevant past experiences using RAG.
-        
+
         Args:
             query: Current game context to search against
             top_k: Number of experiences to retrieve
-            
+
         Returns:
             Formatted string of relevant experiences
         """
         top_k = top_k or config.EXPERIENCE_TOP_K
 
-        if not self.experiences:
-            return "No prior experiences recorded yet."
-
+        # Guard against empty DB — check ChromaDB, not the in-memory list.
+        # self.experiences is cleared on reset() but ChromaDB persists across
+        # epochs (that cross-epoch persistence is the paper's core learning mechanism).
         try:
             self._init_chroma()
             if self._collection.count() == 0:
-                return "No prior experiences recorded yet."
+                return "No relevant experiences found yet."
 
             results = self._collection.query(
                 query_texts=[query],
@@ -111,7 +111,9 @@ class ExperienceLib:
         except Exception as e:
             logger.warning(f"ChromaDB retrieval failed: {e}")
 
-        # Fallback: return most recent experiences
+        # Fallback: return most recent in-memory experiences (current session only)
+        if not self.experiences:
+            return "No relevant experiences found yet."
         recent = self.experiences[-top_k:]
         output = []
         for i, exp in enumerate(recent, 1):
@@ -131,5 +133,9 @@ class ExperienceLib:
             logger.warning(f"Failed to clear ChromaDB: {e}")
 
     def num_experiences(self) -> int:
-        """Number of stored experiences."""
-        return len(self.experiences)
+        """Number of stored experiences (total across all epochs in ChromaDB)."""
+        try:
+            self._init_chroma()
+            return self._collection.count()
+        except Exception:
+            return len(self.experiences)

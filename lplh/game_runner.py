@@ -5,6 +5,7 @@ LPLH agents on IF games via the Jericho environment.
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -45,6 +46,7 @@ class GameRunner:
         # Results tracking
         self.epoch_results = []
         self.all_scores = []
+        self._log_file = None
 
     def run(self) -> dict:
         """Run the full game experiment.
@@ -57,6 +59,16 @@ class GameRunner:
         # Initialize Jericho environment
         env = jericho.FrotzEnv(self.game_path)
         game_name = os.path.splitext(os.path.basename(self.game_path))[0]
+
+        # Open human-readable run log
+        self._run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        os.makedirs(config.LOGS_DIR, exist_ok=True)
+        log_path = os.path.join(config.LOGS_DIR, f"run_log_{game_name}_{self._run_timestamp}.txt")
+        self._log_file = open(log_path, "w", encoding="utf-8", buffering=1)
+        self._log_file.write(f"LPLH Run Log — {game_name}\n")
+        self._log_file.write(f"Epochs: {self.num_epochs} | Steps/epoch: {self.max_steps} | Model: {config.LLM_PROVIDER}/{config.LLM_MODEL}\n")
+        self._log_file.write("=" * 70 + "\n")
+        print(f"Run log: {log_path}")
 
         # Initialize LPLH agent
         llm = LLMClient()
@@ -105,6 +117,9 @@ class GameRunner:
             print("\n\n🛑 Run interrupted by user (Ctrl+C). Saving partial results...")
             logger.warning("Run interrupted by user.")
         finally:
+            if self._log_file:
+                self._log_file.close()
+                self._log_file = None
             elapsed = time.time() - start_time
     
             # Compute summary statistics (if any epochs finished)
@@ -142,11 +157,11 @@ class GameRunner:
         observation, info = env.reset()
         agent.reset(keep_experiences=True)
 
-        # Set to verbose mode (paper specifies this)
+        # Set to verbose mode (paper specifies this).
+        # We discard the verbose confirmation ("Maximum verbosity.") and keep
+        # the real room description from env.reset() as the starting observation.
         try:
-            verbose_obs, _, _, _ = env.step("verbose")
-            if verbose_obs and "verbose" not in verbose_obs.lower():
-                observation = verbose_obs
+            env.step("verbose")
         except Exception:
             pass
 
@@ -191,6 +206,7 @@ class GameRunner:
             # ── Live console output ───────────────────────────
             if self.verbose:
                 self._print_step_detail(agent, step, action, observation, score, reward)
+            self._log_step(epoch, step, action, observation, score, reward, agent)
 
             if done:
                 logger.info(f"Epoch {epoch} ended at step {step}")
@@ -226,26 +242,26 @@ class GameRunner:
         # ── Header ────────────────────────────────────────────
         reward_str = f" ({'+' if reward >= 0 else ''}{reward})" if reward != 0 else ""
         print(f"  ┌─ Step {step}  │  Score: {score}{reward_str}  │  "
-              f"Location: {modules.get('kg_map', {}).get('current_location', '?')}")
-        print(f"  │")
+              f"Location: {modules.get('kg_map', {}).get('current_location', '?')}", flush=True)
+        print(f"  │", flush=True)
 
         # ── Command & Observation ─────────────────────────────
-        print(f"  │  🎮 Command: {action}")
-        print(f"  │  📜 Observation: {_trunc(observation, 250)}")
+        print(f"  │  🎮 Command: {action}", flush=True)
+        print(f"  │  📜 Observation: {_trunc(observation, 250)}", flush=True)
 
         # ── Module 1: KG-Map ──────────────────────────────────
         kg = modules.get("kg_map", {})
         triples = kg.get("extracted_triples", [])
         if triples:
-            print(f"  │")
-            print(f"  │  🗺️  KG-Map ({len(kg.get('rooms_visited', []))} rooms)")
+            print(f"  │", flush=True)
+            print(f"  │  🗺️  KG-Map ({len(kg.get('rooms_visited', []))} rooms)", flush=True)
             for s, r, o in triples[:5]:
-                print(f"  │     Triple: ({s}, {r}, {o})")
+                print(f"  │     Triple: ({s}, {r}, {o})", flush=True)
             if len(triples) > 5:
-                print(f"  │     ... +{len(triples)-5} more")
+                print(f"  │     ... +{len(triples)-5} more", flush=True)
         inv = kg.get("inventory", [])
         if inv:
-            print(f"  │     Inventory: {', '.join(inv)}")
+            print(f"  │     Inventory: {', '.join(inv)}", flush=True)
 
         # ── Module 2: Action Space ────────────────────────────
         act_mod = modules.get("action_space", {})
@@ -255,29 +271,111 @@ class GameRunner:
             status = "✅ Valid" if valid is True else ("❌ Invalid" if valid is False else f"⚠️ {valid}")
             split_str = f" → verb='{split['verb']}' obj={split['objects']}" if isinstance(split, dict) else ""
             print(f"  │  ⚡ Action Space ({act_mod.get('total_actions_learned', 0)} learned): "
-                  f"prev_action {status}{split_str}")
+                  f"prev_action {status}{split_str}", flush=True)
             if act_mod.get("all_verbs"):
                 print(f"  │     Verbs: {', '.join(act_mod['all_verbs'][:10])}"
-                      f"{'...' if len(act_mod.get('all_verbs', [])) > 10 else ''}")
+                      f"{'...' if len(act_mod.get('all_verbs', [])) > 10 else ''}", flush=True)
 
         # ── Module 3: Experience Library ──────────────────────
         exp = modules.get("experience_lib", {})
         if exp.get("score_changed"):
             summary = exp.get("new_experience_summary", "")
             if summary and not str(summary).startswith("ERROR"):
-                print(f"  │  💡 New Experience: {_trunc(str(summary), 150)}")
+                print(f"  │  💡 New Experience: {_trunc(str(summary), 150)}", flush=True)
         retrieved = exp.get("retrieved_experiences", "")
         if retrieved and retrieved != "No relevant experiences found yet.":
-            print(f"  │  📚 Retrieved: {_trunc(str(retrieved), 150)}")
+            print(f"  │  📚 Retrieved: {_trunc(str(retrieved), 150)}", flush=True)
 
         # ── LLM Response ──────────────────────────────────────
         gen = modules.get("action_generation", {})
         raw = gen.get("llm_raw_response", "")
         if raw and not str(raw).startswith("ERROR"):
-            print(f"  │  🤖 LLM Response: {_trunc(str(raw), 200)}")
+            print(f"  │  🤖 LLM Response: {_trunc(str(raw), 200)}", flush=True)
 
-        print(f"  └{'─'*69}")
-        print()
+        print(f"  └{'─'*69}", flush=True)
+        print(flush=True)
+
+    def _log_step(self, epoch: int, step: int, action: str, observation: str,
+                  score: int, reward: int, agent: LPLHAgent):
+        """Write a comprehensive per-step log to the run log file (real-time)."""
+        if not self._log_file or not agent.step_details:
+            return
+        d = agent.step_details[-1]
+        modules = d.get("modules", {})
+        kg = modules.get("kg_map", {})
+        act_mod = modules.get("action_space", {})
+        gen = modules.get("action_generation", {})
+        exp = modules.get("experience_lib", {})
+
+        reward_str = f" ({'+' if reward >= 0 else ''}{reward})" if reward != 0 else ""
+        location = kg.get("current_location") or "?"
+        W = 80
+
+        def section(title):
+            return f"\n--- {title} {'─' * max(0, W - len(title) - 6)}\n"
+
+        lines = []
+        lines.append("\n" + "=" * W)
+        lines.append(f"[EPOCH {epoch} | STEP {step:03d}]  Score: {score}{reward_str}  |  Location: {location}")
+        lines.append("=" * W)
+
+        # ── Command ───────────────────────────────────────────
+        lines.append(section("COMMAND"))
+        lines.append(action)
+
+        # ── Game Response ─────────────────────────────────────
+        lines.append(section("GAME RESPONSE"))
+        lines.append(observation)
+
+        # ── KG Map (full JSON) ────────────────────────────────
+        lines.append(section("KG MAP (JSON)"))
+        lines.append(gen.get("prompt_kg_map", kg.get("room_info", "N/A")))
+
+        # ── Action Space ──────────────────────────────────────
+        lines.append(section("ACTION SPACE"))
+        lines.append(f"Total verbs learned: {len(act_mod.get('all_verbs', []))}")
+        lines.append(f"Total actions learned: {act_mod.get('total_actions_learned', 0)}")
+        lines.append("")
+        lines.append(gen.get("prompt_action_pairs", "N/A"))
+
+        # ── Experience Library ────────────────────────────────
+        lines.append(section("EXPERIENCE LIBRARY"))
+        lines.append(f"Total experiences in DB: {exp.get('total_experiences', 0)}")
+        lines.append(f"Score changed this step: {exp.get('score_changed', False)}")
+        if exp.get("score_changed") and exp.get("new_experience_summary"):
+            summary = str(exp["new_experience_summary"])
+            if not summary.startswith("ERROR"):
+                lines.append("\n[NEW EXPERIENCE STORED]")
+                lines.append(summary)
+        lines.append("\n[RETRIEVED EXPERIENCES]")
+        lines.append(str(exp.get("retrieved_experiences", "None")))
+
+        # ── Full Prompt Sent to LLM ───────────────────────────
+        lines.append(section("FULL PROMPT TO LLM"))
+        lines.append(gen.get("full_prompt", "N/A"))
+
+        # ── LLM Raw Response ──────────────────────────────────
+        lines.append(section("LLM RAW RESPONSE"))
+        lines.append(str(gen.get("llm_raw_response", "N/A")))
+
+        # ── Reasoning (extracted <rea> tag) ───────────────────
+        raw = str(gen.get("llm_raw_response", ""))
+        rea_match = re.search(r"<rea>(.*?)</rea>", raw, re.DOTALL)
+        if rea_match:
+            lines.append(section("REASONING (extracted)"))
+            lines.append(rea_match.group(1).strip())
+
+        # ── Prev Action Validation ────────────────────────────
+        valid = act_mod.get("prev_action_valid")
+        split = act_mod.get("action_split")
+        if valid is not None:
+            lines.append(section("PREV ACTION VALIDATION"))
+            lines.append(f"Valid: {valid}")
+            if isinstance(split, dict):
+                lines.append(f"Verb: {split.get('verb')}  |  Objects: {split.get('objects')}")
+
+        lines.append("\n" + "─" * W + "\n")
+        self._log_file.write("\n".join(lines) + "\n")
 
     def _compute_summary(self, game_name: str, elapsed: float) -> dict:
         """Compute summary statistics across all epochs."""

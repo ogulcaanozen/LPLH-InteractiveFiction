@@ -37,16 +37,18 @@ class LLMClient:
 
         logger.info(f"LLM Client initialized: provider={self.provider}, model={self.model}")
 
-    def chat(self, system_prompt: str, user_prompt: str, temperature: float = None) -> str:
+    def chat(self, system_prompt: str, user_prompt: str, temperature: float = None,
+             think: bool = False) -> str:
         """Send a chat request and return the response text."""
         temp = temperature if temperature is not None else self.temperature
 
         if self.provider == "ollama":
-            return self._chat_ollama(system_prompt, user_prompt, temp)
+            return self._chat_ollama(system_prompt, user_prompt, temp, think=think)
         elif self.provider == "openai":
             return self._chat_openai(system_prompt, user_prompt, temp)
 
-    def _chat_ollama(self, system_prompt: str, user_prompt: str, temperature: float) -> str:
+    def _chat_ollama(self, system_prompt: str, user_prompt: str, temperature: float,
+                     think: bool = False) -> str:
         """Chat via Ollama."""
         messages = []
         if system_prompt:
@@ -57,6 +59,7 @@ class LLMClient:
             model=self.model,
             messages=messages,
             options={"temperature": temperature},
+            think=think,
         )
         return response["message"]["content"]
 

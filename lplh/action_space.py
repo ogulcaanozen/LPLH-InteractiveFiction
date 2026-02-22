@@ -7,6 +7,7 @@ location objects to suggest candidate actions.
 """
 
 import logging
+from itertools import permutations
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +43,17 @@ class ActionSpace:
         if not verb:
             return
 
-        if verb not in self.verbs:
+        is_new_verb = verb not in self.verbs
+        if is_new_verb:
             self.verbs[verb] = set()
+
+        # Verbs with no "&" placeholder are no-object verbs (look, north, inventory, etc.).
+        # They must not gain objects — even if the LLM hallucinates some.
+        if "&" not in verb:
+            if is_new_verb:
+                self.total_actions_learned += 1
+                logger.debug(f"Learned no-object verb: {verb}")
+            return
 
         for obj in objects:
             obj_clean = obj.strip().lower()
@@ -51,10 +61,6 @@ class ActionSpace:
                 self.verbs[verb].add(obj_clean)
                 self.total_actions_learned += 1
                 logger.debug(f"Learned action: {verb} -> {obj_clean}")
-
-        # Even verbs with no objects should be stored (e.g., "look", "north")
-        if not objects:
-            self.total_actions_learned += 1
 
     def get_action_pairs(self, current_objects: list) -> list:
         """Generate possible action-object pairs for the current location.
@@ -71,17 +77,29 @@ class ActionSpace:
         pairs = []
         objects_lower = [o.strip().lower() for o in current_objects]
 
-        for verb, known_objs in self.verbs.items():
-            if "&" not in verb:
-                # No-object verb (directions, look, inventory, etc.)
+        for verb in self.verbs:
+            n_placeholders = verb.count("&")
+            if n_placeholders == 0:
+                # No-object verb (directions, look, inventory, etc.) — skip pairing
                 continue
 
-            # Check which current objects match this verb's known objects
-            for obj in objects_lower:
-                if obj in known_objs:
-                    # Generate the concrete action
+            if n_placeholders == 1:
+                # Single-object verb: pair with every object in current location
+                # per paper Eq. 4: pairing(obj_loc, AS)
+                for obj in objects_lower:
                     concrete = verb.replace("&", obj, 1)
-                    pairs.append(concrete)
+                    if concrete not in pairs:
+                        pairs.append(concrete)
+            else:
+                # Multi-object verb (e.g. "put & in &"): fill ALL placeholders.
+                # Generate all ordered permutations of current objects of length
+                # n_placeholders so every slot gets a distinct object.
+                for perm in permutations(objects_lower, n_placeholders):
+                    concrete = verb
+                    for obj in perm:
+                        concrete = concrete.replace("&", obj, 1)
+                    if concrete not in pairs:
+                        pairs.append(concrete)
 
         return pairs
 
@@ -92,19 +110,23 @@ class ActionSpace:
             current_objects: Objects in the current location
         """
         pairs = self.get_action_pairs(current_objects)
-        
-        if not pairs:
-            return "No known actions for objects in this location yet. Try exploring!"
 
-        output = ["Known valid actions for objects here:"]
-        for pair in pairs:
-            output.append(f"  - {pair}")
+        output = []
 
-        # Also list all known verbs for reference
-        output.append("")
-        output.append(f"All learned verbs ({len(self.verbs)} total):")
-        for verb in sorted(self.verbs.keys()):
-            output.append(f"  - {verb}")
+        if pairs:
+            output.append("Known valid actions for objects here:")
+            for pair in pairs:
+                output.append(f"  - {pair}")
+            output.append("")
+
+        # Always list all known verbs — including no-object verbs (look, north, etc.)
+        # so the LLM can use them even when no object pairs are found
+        if self.verbs:
+            output.append(f"All learned verbs ({len(self.verbs)} total):")
+            for verb in sorted(self.verbs.keys()):
+                output.append(f"  - {verb}")
+        else:
+            output.append("No actions learned yet. Try exploring!")
 
         return "\n".join(output)
 

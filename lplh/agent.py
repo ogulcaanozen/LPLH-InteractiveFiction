@@ -45,6 +45,9 @@ class LPLHAgent:
         self.total_score = 0
         self.step_count = 0
 
+        # Per-step detail log for tracking
+        self.step_details = []
+
     def reset(self, keep_experiences: bool = True):
         """Reset the agent for a new epoch.
         
@@ -61,6 +64,7 @@ class LPLHAgent:
         self.prev_score = 0
         self.total_score = 0
         self.step_count = 0
+        self.step_details = []
         logger.info(f"Agent reset (keep_experiences={keep_experiences})")
 
     def act(self, observation: str, score: int, done: bool, info: dict) -> str:
@@ -80,27 +84,101 @@ class LPLHAgent:
         self.step_count += 1
         reward_change = score - self.prev_score
 
+        # ── History update ────────────────────────────────────
+        # observation is the game's response to prev_action, so
+        # (prev_action, observation) is a correct completed pair.
+        # Must happen before _format_history() is called below.
+        if self.prev_action is not None:
+            self.history.append((self.prev_action, observation))
+            if len(self.history) > config.HISTORY_LENGTH:
+                self.history = self.history[-config.HISTORY_LENGTH:]
+
+        # Build detailed log for this step
+        detail = {
+            "step": self.step_count,
+            "observation": observation,
+            "score": score,
+            "reward_change": reward_change,
+            "prev_action": self.prev_action,
+            "modules": {},
+        }
+
         # ── Step 1: Update KG-map with relation extraction ────
+        extracted_triples = []
         if self.prev_action:
             try:
-                triples = self.llm.extract_relations(self.prev_action, observation)
-                self.kg_map.update(triples, self.prev_action)
-                logger.debug(f"KG-map updated with {len(triples)} triples")
+                extracted_triples = self.llm.extract_relations(self.prev_action, observation)
+                self.kg_map.update(extracted_triples, self.prev_action)
+                logger.debug(f"KG-map updated with {len(extracted_triples)} triples")
             except Exception as e:
                 logger.warning(f"Relation extraction failed: {e}")
+                extracted_triples = [("ERROR", str(e), "")]
+
+        detail["modules"]["kg_map"] = {
+            "extracted_triples": [(s, r, o) for s, r, o in extracted_triples],
+            "current_location": self.kg_map.current_location,
+            "rooms_visited": list(self.kg_map.visited_rooms),
+            "inventory": list(self.kg_map.inventory),
+            "room_info": self.kg_map.get_current_room_info(),
+        }
 
         # ── Step 2: Validate previous action & store in action space ──
+        action_valid = None
+        action_split = None
         if self.prev_action:
             try:
                 is_valid = self.llm.validate_action(self.prev_action, observation)
+                action_valid = is_valid
+                if not is_valid:
+                    # If a movement direction was invalid, remove it from may_direction
+                    prev_lower = self.prev_action.lower().strip()
+                    if prev_lower in self.kg_map._direction_set():
+                        self.kg_map.mark_direction_tried(prev_lower)
+                else:
+                    # If a movement direction was valid, also remove from may_direction
+                    # (the relation extractor may not always extract the direction triple)
+                    prev_lower = self.prev_action.lower().strip()
+                    if prev_lower in self.kg_map._direction_set():
+                        self.kg_map.mark_direction_tried(prev_lower)
                 if is_valid:
                     split = self.llm.split_action(self.prev_action)
+                    action_split = split
                     self.action_space.store_action(split["verb"], split["objects"])
                     logger.debug(f"Valid action stored: {split}")
+
+                    # Update inventory only for confirmed-valid take/drop actions.
+                    # This must happen here (after validation) so that failed
+                    # attempts like "take sword" → "The sword is too heavy" do
+                    # NOT pollute the inventory. (kg_map.update no longer touches
+                    # inventory so it cannot hallucinate items.)
+                    prev_lower = self.prev_action.lower().strip()
+                    if prev_lower.startswith("take ") or prev_lower.startswith("get "):
+                        item = self.prev_action[5:].strip() if prev_lower.startswith("take ") else self.prev_action[4:].strip()
+                        self.kg_map.take_item(item)
+                    elif prev_lower.startswith("drop "):
+                        self.kg_map.drop_item(self.prev_action[5:].strip())
+                    elif prev_lower.startswith(("eat ", "drink ", "give ")):
+                        # These verbs always consume the item — remove from
+                        # inventory without putting it back in the room.
+                        # "throw" and "use" are intentionally excluded: outcome
+                        # is conditional and can't be determined from verb alone.
+                        item = self.prev_action.split(" ", 1)[1].strip() if " " in self.prev_action else ""
+                        if item:
+                            self.kg_map.consume_item(item)
             except Exception as e:
                 logger.warning(f"Action validation/splitting failed: {e}")
+                action_valid = f"ERROR: {e}"
+
+        detail["modules"]["action_space"] = {
+            "prev_action_valid": action_valid,
+            "action_split": action_split,
+            "total_verbs": len(self.action_space.verbs),
+            "total_actions_learned": self.action_space.num_actions(),
+            "all_verbs": list(self.action_space.verbs.keys()),
+        }
 
         # ── Step 3: Summarize experience on score change ──────
+        experience_summary = None
         if reward_change != 0 and self.prev_action:
             try:
                 history_text = self._format_history()
@@ -109,6 +187,7 @@ class LPLHAgent:
                     reward_change=reward_change,
                     current_score=score,
                 )
+                experience_summary = exp_summary
                 self.experience_lib.store_experience(
                     experience_text=exp_summary,
                     metadata={
@@ -121,10 +200,18 @@ class LPLHAgent:
                 logger.info(f"Experience stored: score change {reward_change:+d}")
             except Exception as e:
                 logger.warning(f"Experience summarization failed: {e}")
+                experience_summary = f"ERROR: {e}"
 
         # ── Step 4: Retrieve relevant experiences ─────────────
         query = f"Location: {self.kg_map.current_location}. Observation: {observation[:200]}"
         experiences = self.experience_lib.retrieve_relevant(query)
+
+        detail["modules"]["experience_lib"] = {
+            "score_changed": reward_change != 0,
+            "new_experience_summary": experience_summary,
+            "retrieved_experiences": experiences,
+            "total_experiences": self.experience_lib.num_experiences(),
+        }
 
         # ── Step 5: Generate next command ─────────────────────
         room_info = self.kg_map.get_current_room_info()
@@ -139,24 +226,35 @@ class LPLHAgent:
             observation=observation,
         )
 
+        raw_llm_response = ""
         try:
-            response = self.llm.chat(
+            raw_llm_response = self.llm.chat(
                 system_prompt="You are an expert player of text-based interactive fiction games.",
                 user_prompt=prompt,
+                think=True,
             )
-            command = self._parse_command(response)
+            command = self._parse_command(raw_llm_response)
         except Exception as e:
             logger.error(f"Action generation failed: {e}")
+            raw_llm_response = f"ERROR: {e}"
             command = "look"  # Safe fallback
 
+        detail["modules"]["action_generation"] = {
+            "prompt_kg_map": self.kg_map.to_prompt_string(),
+            "prompt_action_pairs": self.action_space.to_prompt_string(current_objects),
+            "prompt_experiences": experiences,
+            "full_prompt": prompt,
+            "llm_raw_response": raw_llm_response,
+            "parsed_command": command,
+        }
+
         # ── Update state ──────────────────────────────────────
-        self.history.append((command, observation))
-        # Keep only last HISTORY_LENGTH turns
-        if len(self.history) > config.HISTORY_LENGTH:
-            self.history = self.history[-config.HISTORY_LENGTH:]
         self.prev_action = command
         self.prev_score = score
         self.total_score = score
+
+        detail["final_command"] = command
+        self.step_details.append(detail)
 
         logger.info(f"Step {self.step_count}: score={score} ({reward_change:+d}) "
                      f"cmd='{command}' loc='{self.kg_map.current_location}'")
@@ -165,33 +263,43 @@ class LPLHAgent:
 
     def _parse_command(self, response: str) -> str:
         """Extract the game command from the LLM response.
-        
+
         Looks for |start| <com>[command]</com> ... |end| pattern.
         Falls back to |start| [command] |end| pattern.
         """
         # Try <com>...</com> pattern first (LPLH format)
         com_match = re.search(r"<com>\s*(.+?)\s*</com>", response)
         if com_match:
-            return com_match.group(1).strip()
+            cmd = self._clean_command(com_match.group(1))
+            if self._is_plausible_command(cmd):
+                return cmd
 
         # Try |start| ... |end| pattern (baseline format)
         start_match = re.search(r"\|start\|\s*(.+?)\s*\|end\|", response, re.DOTALL)
         if start_match:
             text = start_match.group(1).strip()
-            # Remove any remaining tags
             text = re.sub(r"<[^>]+>", "", text).strip()
-            # Take only the first line
-            return text.split("\n")[0].strip()
+            cmd = self._clean_command(text.split("\n")[0])
+            if self._is_plausible_command(cmd):
+                return cmd
 
-        # Fallback: take the last meaningful line
-        lines = [l.strip() for l in response.strip().split("\n") if l.strip()]
-        if lines:
-            last = lines[-1]
-            # Remove common prefixes
-            last = re.sub(r"^(Final Command:|Command:)\s*", "", last, flags=re.IGNORECASE)
-            return last.strip()
+        return "look"  # fallback — safe and avoids sending garbage to the game
 
-        return "look"  # absolute fallback
+    def _clean_command(self, cmd: str) -> str:
+        """Strip markdown formatting that the LLM sometimes wraps commands in."""
+        cmd = cmd.strip()
+        cmd = re.sub(r'^`+|`+$', '', cmd).strip()   # remove surrounding backticks
+        cmd = re.sub(r'^\*+|\*+$', '', cmd).strip()  # remove surrounding asterisks
+        return cmd
+
+    def _is_plausible_command(self, cmd: str) -> bool:
+        """Return False if cmd looks like an assistant-mode response rather than a game command."""
+        if not cmd:
+            return False
+        if len(cmd) > 50:
+            return False
+        bad_phrases = ["would you", "i can help", "as an ai", "here's", "please ", "i'll "]
+        return not any(p in cmd.lower() for p in bad_phrases)
 
     def _format_history(self) -> str:
         """Format the recent history for prompt inclusion."""
@@ -217,3 +325,7 @@ class LPLHAgent:
             "experiences_stored": self.experience_lib.num_experiences(),
             "current_location": self.kg_map.current_location,
         }
+
+    def get_step_details(self) -> list:
+        """Return the detailed per-step log."""
+        return self.step_details

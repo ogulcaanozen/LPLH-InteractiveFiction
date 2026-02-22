@@ -70,6 +70,10 @@ class KGMap:
                 if loc:
                     self._ensure_node(loc)
                     self.nodes[loc]["direction"][rel_lower] = obj_clean
+                    # Direction is now confirmed — remove from may_direction
+                    may = self.nodes[loc]["may_direction"]
+                    if rel_lower in may:
+                        may.remove(rel_lower)
 
             # Handle requirements: <Location, need/require, action>
             elif rel_lower in ("need", "require"):
@@ -93,19 +97,44 @@ class KGMap:
             if new_location not in self.visited_rooms:
                 self.visited_rooms.append(new_location)
 
-        # Handle inventory changes from actions
-        action_lower = action.lower().strip()
-        if action_lower.startswith("take ") or action_lower.startswith("get "):
-            item = action[5:].strip() if action_lower.startswith("take ") else action[4:].strip()
-            if item and item not in self.inventory:
-                self.inventory.append(item)
-            # Remove from room objects
-            if self.current_location and self.current_location in self.nodes:
-                objs = self.nodes[self.current_location]["have"]
-                self.nodes[self.current_location]["have"] = [o for o in objs if o.lower() != item.lower()]
-        elif action_lower.startswith("drop "):
-            item = action[5:].strip()
-            self.inventory = [i for i in self.inventory if i.lower() != item.lower()]
+    def take_item(self, item: str):
+        """Record a successfully taken item: add to inventory, remove from room.
+
+        Called only after the action is confirmed valid (agent.py Step 2).
+        """
+        item_lower = item.strip().lower()
+        if not item_lower:
+            return
+        if item_lower not in [i.lower() for i in self.inventory]:
+            self.inventory.append(item_lower)
+        if self.current_location and self.current_location in self.nodes:
+            objs = self.nodes[self.current_location]["have"]
+            self.nodes[self.current_location]["have"] = [
+                o for o in objs if o.lower() != item_lower
+            ]
+
+    def drop_item(self, item: str):
+        """Record a successfully dropped item: remove from inventory, add to room.
+
+        Called only after the action is confirmed valid (agent.py Step 2).
+        """
+        item_lower = item.strip().lower()
+        if not item_lower:
+            return
+        self.inventory = [i for i in self.inventory if i.lower() != item_lower]
+        if self.current_location and self.current_location in self.nodes:
+            if item_lower not in self.nodes[self.current_location]["have"]:
+                self.nodes[self.current_location]["have"].append(item_lower)
+
+    def consume_item(self, item: str):
+        """Remove a consumed item from inventory without adding it to the room.
+
+        Used for verbs that permanently destroy or transfer the item
+        (eat, drink, give). The item is gone — it does not reappear in `have`.
+        """
+        item_lower = item.strip().lower()
+        if item_lower:
+            self.inventory = [i for i in self.inventory if i.lower() != item_lower]
 
     def _ensure_node(self, location: str):
         """Create a node if it doesn't exist."""
@@ -114,18 +143,32 @@ class KGMap:
                 "have": [],           # confirmed objects
                 "direction": {},      # confirmed exits {dir: destination}
                 "may_have": [],       # uncertain objects
-                "may_direction": [],  # uncertain exits
+                "may_direction": self._standard_directions(),  # all directions untried on discovery
                 "needs": [],          # requirements
             }
 
+    def _standard_directions(self):
+        """Full-word directions populated into may_direction on room discovery."""
+        return ["north", "south", "east", "west",
+                "northeast", "northwest", "southeast", "southwest",
+                "up", "down"]
+
     def _direction_set(self):
-        """All valid direction strings."""
+        """All valid direction strings (including abbreviations)."""
         return {
             "north", "south", "east", "west",
             "northeast", "northwest", "southeast", "southwest",
             "up", "down", "n", "s", "e", "w",
             "ne", "nw", "se", "sw",
         }
+
+    def mark_direction_tried(self, direction: str):
+        """Remove a tried-but-invalid direction from may_direction."""
+        direction_lower = direction.strip().lower()
+        if self.current_location and self.current_location in self.nodes:
+            may = self.nodes[self.current_location]["may_direction"]
+            if direction_lower in may:
+                may.remove(direction_lower)
 
     def get_current_room_info(self) -> dict:
         """Get objects and directions for the current location."""
@@ -142,31 +185,41 @@ class KGMap:
         }
 
     def to_prompt_string(self) -> str:
-        """Serialize the KG-map for inclusion in the LLM prompt."""
-        if not self.nodes:
-            return "Map is empty. Start exploring!"
+        """Serialize the KG-map as JSON for inclusion in the LLM prompt.
 
-        output = []
-        output.append(f"Current Location: {self.current_location or 'Unknown'}")
-        output.append(f"Visited Rooms: {', '.join(self.visited_rooms)}")
-        output.append(f"Inventory: {', '.join(self.inventory) if self.inventory else 'Empty'}")
-        output.append("")
+        The paper explicitly states the KG-map is "JSON-structured" (Limitations
+        section). The field names — temp_have, have, may_have, direction,
+        may_direction — match exactly those referenced in the action generation
+        prompt (Table 9 Priority Usage rules).
 
+        temp_have: player's current inventory (items on hand, highest priority).
+                   Only populated for the current room node since inventory
+                   items are always available to the player wherever they are.
+        have:       confirmed objects present in a room.
+        may_have:   objects whose presence is uncertain.
+        direction:  confirmed exits {direction: destination_room}.
+        may_direction: possible exits not yet verified.
+        needs:      requirements to progress (e.g., "machete to go west").
+        """
+        map_nodes = {}
         for loc, data in self.nodes.items():
-            marker = " (YOU ARE HERE)" if loc == self.current_location else ""
-            output.append(f"[{loc}]{marker}")
-            if data["have"]:
-                output.append(f"  have: {', '.join(data['have'])}")
-            if data["direction"]:
-                dirs = [f"{d} -> {dest}" for d, dest in data["direction"].items()]
-                output.append(f"  direction: {', '.join(dirs)}")
-            if data.get("may_direction"):
-                output.append(f"  may_direction: {', '.join(data['may_direction'])}")
+            node = {
+                "temp_have": list(self.inventory) if loc == self.current_location else [],
+                "have": data["have"],
+                "may_have": data.get("may_have", []),
+                "direction": data["direction"],
+                "may_direction": data.get("may_direction", []),
+            }
             if data.get("needs"):
-                output.append(f"  needs: {', '.join(data['needs'])}")
-            output.append("")
+                node["needs"] = data["needs"]
+            map_nodes[loc] = node
 
-        return "\n".join(output)
+        kg_json = {
+            "current_location": self.current_location,
+            "visited_rooms": list(self.visited_rooms),
+            "map": map_nodes,
+        }
+        return json.dumps(kg_json, indent=2)
 
     def to_dict(self) -> dict:
         """Export KG-map as a dictionary (for saving)."""

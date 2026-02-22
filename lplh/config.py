@@ -3,7 +3,7 @@
 import os
 
 # ── Game Settings ──────────────────────────────────────────────
-NUM_EPOCHS = 10
+NUM_EPOCHS = 2
 MAX_STEPS_PER_EPOCH = 250
 HISTORY_LENGTH = 10  # last N turns kept in context
 
