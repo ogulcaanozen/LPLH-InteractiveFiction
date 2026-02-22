@@ -35,7 +35,29 @@ class LLMClient:
         else:
             raise ValueError(f"Unknown LLM provider: {self.provider}")
 
-        logger.info(f"LLM Client initialized: provider={self.provider}, model={self.model}")
+        # Probe once whether this model supports thinking mode.
+        # Avoids a failed HTTP request on every action generation step.
+        self._thinking_supported = self._probe_thinking_support()
+
+        logger.info(f"LLM Client initialized: provider={self.provider}, model={self.model}, "
+                    f"thinking={'yes' if self._thinking_supported else 'no'}")
+
+    def _probe_thinking_support(self) -> bool:
+        """Send a minimal request with think=True to check if the model supports it."""
+        if self.provider != "ollama":
+            return False
+        try:
+            self._ollama.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": "hi"}],
+                options={"temperature": 0.0, "num_predict": 1},
+                think=True,
+            )
+            return True
+        except Exception as e:
+            if "does not support thinking" in str(e):
+                return False
+            return False  # Any other error: safe default is no thinking
 
     def chat(self, system_prompt: str, user_prompt: str, temperature: float = None,
              think: bool = False) -> str:
@@ -55,23 +77,13 @@ class LLMClient:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": user_prompt})
 
-        try:
-            response = self._ollama.chat(
-                model=self.model,
-                messages=messages,
-                options={"temperature": temperature},
-                think=think,
-            )
-        except Exception as e:
-            if think and "does not support thinking" in str(e):
-                # Non-thinking model (e.g. qwen2.5) — retry without think flag
-                response = self._ollama.chat(
-                    model=self.model,
-                    messages=messages,
-                    options={"temperature": temperature},
-                )
-            else:
-                raise
+        use_think = think and self._thinking_supported
+        response = self._ollama.chat(
+            model=self.model,
+            messages=messages,
+            options={"temperature": temperature},
+            think=use_think,
+        )
         return response["message"]["content"]
 
     def _chat_openai(self, system_prompt: str, user_prompt: str, temperature: float) -> str:
