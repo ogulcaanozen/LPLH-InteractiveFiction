@@ -295,6 +295,7 @@ class LPLHAgent:
         cmd = cmd.strip()
         cmd = re.sub(r'^`+|`+$', '', cmd).strip()   # remove surrounding backticks
         cmd = re.sub(r'^\*+|\*+$', '', cmd).strip()  # remove surrounding asterisks
+        cmd = re.sub(r'^\[+|\]+$', '', cmd).strip()  # remove surrounding square brackets
         return cmd
 
     def _is_plausible_command(self, cmd: str) -> bool:
