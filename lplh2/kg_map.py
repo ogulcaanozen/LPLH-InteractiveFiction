@@ -154,12 +154,14 @@ class KGMap:
                 "up", "down"]
 
     def _direction_set(self):
-        """All valid direction strings (including abbreviations)."""
+        """All valid direction strings (full words and all abbreviations)."""
         return {
             "north", "south", "east", "west",
             "northeast", "northwest", "southeast", "southwest",
-            "up", "down", "n", "s", "e", "w",
+            "up", "down",
+            "n", "s", "e", "w",
             "ne", "nw", "se", "sw",
+            "u", "d",
         }
 
     def mark_direction_tried(self, direction: str):

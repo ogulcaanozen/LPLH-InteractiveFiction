@@ -400,26 +400,39 @@ class LPLHAgent:
 
     # ── Shared helpers ────────────────────────────────────────
 
+    # Abbreviation → full direction word.
+    # may_direction always stores full words, so we must normalise before
+    # passing to mark_direction_tried / confirm_direction.
+    _DIR_ABBREVS = {
+        "n": "north", "s": "south", "e": "east", "w": "west",
+        "ne": "northeast", "nw": "northwest",
+        "se": "southeast", "sw": "southwest",
+        "u": "up", "d": "down",
+    }
+
     def _extract_bare_direction(self, action: str) -> str:
-        """Extract the bare direction word from a movement command.
+        """Extract and normalise the direction from any movement command form.
 
-        Handles both 'north' and 'go north' forms.
-        Returns None if the action is not a direction command.
-
-        Examples:
-            'north'      → 'north'
-            'go north'   → 'north'
-            'go northeast' → 'northeast'
-            'open door'  → None
+        Handles all three variants the LLM (or Zork) may produce:
+          'north'      → 'north'
+          'go north'   → 'north'
+          'n'          → 'north'   (abbreviation)
+          'go n'       → 'north'   (go + abbreviation)
+          'u'          → 'up'
+          'open door'  → None      (not a direction command)
         """
         direction_set = self.kg_map._direction_set()
         a = action.lower().strip()
-        if a in direction_set:
-            return a
+
+        # Strip optional "go " prefix
         if a.startswith("go "):
-            candidate = a[3:].strip()
-            if candidate in direction_set:
-                return candidate
+            a = a[3:].strip()
+
+        # Now a is either a full word or an abbreviation
+        if a in direction_set:
+            # Normalise abbreviation → full word so it matches may_direction entries
+            return self._DIR_ABBREVS.get(a, a)
+
         return None
 
     def _parse_command(self, response: str) -> str:
