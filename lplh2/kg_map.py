@@ -165,24 +165,39 @@ class KGMap:
         }
 
     def mark_direction_tried(self, direction: str):
-        """Remove a tried direction from may_direction of the CURRENT location."""
+        """Mark a failed direction at the CURRENT location as invalid.
+
+        Removes it from both may_direction (unverified) and direction (confirmed).
+        The relation extractor sometimes produces a false direction triple, putting
+        a non-existent exit into the confirmed `direction` dict. When the game then
+        rejects that direction, we must purge it from both structures so the agent
+        never retries it.
+        """
         direction_lower = direction.strip().lower()
         if self.current_location and self.current_location in self.nodes:
-            may = self.nodes[self.current_location]["may_direction"]
+            node = self.nodes[self.current_location]
+            may = node["may_direction"]
             if direction_lower in may:
                 may.remove(direction_lower)
+            # Also remove from confirmed exits if it was falsely recorded there
+            if direction_lower in node["direction"]:
+                del node["direction"][direction_lower]
 
     def mark_direction_tried_at(self, direction: str, location: str):
-        """Remove a tried direction from may_direction of a SPECIFIC location.
+        """Mark a failed direction at a SPECIFIC location as invalid.
 
         Used when current_location has already changed (e.g. after a valid move)
         and we need to update the SOURCE room, not the destination.
+        Removes from both may_direction and direction (handles false relation-extractor triples).
         """
         direction_lower = direction.strip().lower()
         if location and location in self.nodes:
-            may = self.nodes[location]["may_direction"]
+            node = self.nodes[location]
+            may = node["may_direction"]
             if direction_lower in may:
                 may.remove(direction_lower)
+            if direction_lower in node["direction"]:
+                del node["direction"][direction_lower]
 
     def confirm_direction(self, from_location: str, direction: str, to_location: str):
         """Record a confirmed valid exit in the source room.
